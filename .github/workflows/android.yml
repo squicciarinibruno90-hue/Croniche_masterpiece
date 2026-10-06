@@ -13,67 +13,96 @@ jobs:
     timeout-minutes: 60
 
     steps:
+
+      # ============================================================
+      # 1. CHECKOUT
+      # ============================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Show repository files
-        run: |
-          echo "=== FILE NEL REPOSITORY ==="
-          find . -maxdepth 3 -type f -print
+
+      # ============================================================
+      # 2. TROVA LO ZIP
+      # ============================================================
 
       - name: Find Cronache ZIP
         id: find_zip
         shell: bash
         run: |
+          echo "=== FILE PRESENTI ==="
+          find . -maxdepth 3 -type f -print
+
           ZIP_FILE=$(find . -maxdepth 2 -type f \
-            \( -iname "Cronache_Masterpiece_Connected.zip" \
-            -o -iname "*Cronache*Masterpiece*.zip" \
-            -o -iname "*Cronache*.zip" \) \
+            \( \
+              -iname "Cronache_Masterpiece_Connected.zip" \
+              -o -iname "*Cronache*Masterpiece*.zip" \
+              -o -iname "*Cronache*.zip" \
+            \) \
             | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
             echo "ERRORE: ZIP di Cronache non trovato."
-            echo "ZIP presenti:"
+            echo "ZIP disponibili:"
             find . -type f -iname "*.zip" -print || true
             exit 1
           fi
 
-          echo "ZIP trovato: $ZIP_FILE"
+          echo "ZIP trovato:"
+          echo "$ZIP_FILE"
+
           echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
 
-      - name: Extract Cronache project
+
+      # ============================================================
+      # 3. ESTRAZIONE
+      # ============================================================
+
+      - name: Extract Cronache
         shell: bash
         run: |
-          rm -rf "$GITHUB_WORKSPACE/cronache_build"
-          mkdir -p "$GITHUB_WORKSPACE/cronache_build"
+          BUILD_DIR="$GITHUB_WORKSPACE/cronache_build"
+
+          rm -rf "$BUILD_DIR"
+          mkdir -p "$BUILD_DIR"
 
           unzip -o \
             "${{ steps.find_zip.outputs.zip_file }}" \
-            -d "$GITHUB_WORKSPACE/cronache_build"
+            -d "$BUILD_DIR"
 
           echo "=== CONTENUTO ESTRATTO ==="
-          find "$GITHUB_WORKSPACE/cronache_build" \
-            -maxdepth 3 \
-            -type f \
-            -print | head -200
 
-      - name: Find Android project root
+          find "$BUILD_DIR" \
+            -maxdepth 4 \
+            -type f \
+            -print | head -300
+
+
+      # ============================================================
+      # 4. TROVA ROOT DEL PROGETTO
+      # ============================================================
+
+      - name: Find Android project
         id: project
         shell: bash
         run: |
           SETTINGS=$(find "$GITHUB_WORKSPACE/cronache_build" \
             -type f \
-            \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
+            \( \
+              -name "settings.gradle.kts" \
+              -o -name "settings.gradle" \
+            \) \
             | head -n 1)
 
           if [ -z "$SETTINGS" ]; then
-            echo "ERRORE: settings.gradle.kts non trovato."
+            echo "ERRORE: settings.gradle(.kts) non trovato."
             exit 1
           fi
 
           PROJECT_DIR=$(dirname "$SETTINGS")
 
-          echo "Project root: $PROJECT_DIR"
+          echo "Project root:"
+          echo "$PROJECT_DIR"
 
           if [ ! -d "$PROJECT_DIR/app" ]; then
             echo "ERRORE: cartella app non trovata."
@@ -82,35 +111,124 @@ jobs:
 
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
+
+      # ============================================================
+      # 5. JAVA
+      # ============================================================
+
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK NDK and CMake
+      # ============================================================
+      # 6. ANDROID SDK
+      # Usa direttamente quello già presente nel runner GitHub
+      # ============================================================
+
+      - name: Detect Android SDK
+        id: android
         shell: bash
         run: |
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
 
-          sdkmanager \
+          if [ -n "$ANDROID_HOME" ] && [ -d "$ANDROID_HOME" ]; then
+            SDK_ROOT="$ANDROID_HOME"
+          elif [ -n "$ANDROID_SDK_ROOT" ] && [ -d "$ANDROID_SDK_ROOT" ]; then
+            SDK_ROOT="$ANDROID_SDK_ROOT"
+          elif [ -d "/usr/local/lib/android/sdk" ]; then
+            SDK_ROOT="/usr/local/lib/android/sdk"
+          else
+            echo "ERRORE: Android SDK non trovato."
+            exit 1
+          fi
+
+          echo "SDK_ROOT=$SDK_ROOT"
+          echo "sdk_root=$SDK_ROOT" >> "$GITHUB_OUTPUT"
+
+
+      # ============================================================
+      # 7. TROVA SDKMANAGER
+      # ============================================================
+
+      - name: Find sdkmanager
+        id: sdkmanager
+        shell: bash
+        run: |
+          SDK_ROOT="${{ steps.android.outputs.sdk_root }}"
+
+          SDKMANAGER=""
+
+          if [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          fi
+
+          if [ -z "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$SDK_ROOT/cmdline-tools" \
+              -type f \
+              -name sdkmanager \
+              2>/dev/null \
+              | sort -V \
+              | tail -n 1)
+          fi
+
+          if [ -z "$SDKMANAGER" ]; then
+            SDKMANAGER=$(command -v sdkmanager || true)
+          fi
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERRORE: sdkmanager non trovato."
+            exit 1
+          fi
+
+          echo "sdkmanager:"
+          echo "$SDKMANAGER"
+
+          echo "sdkmanager=$SDKMANAGER" >> "$GITHUB_OUTPUT"
+
+
+      # ============================================================
+      # 8. INSTALLA COMPONENTI ANDROID
+      # ============================================================
+
+      - name: Install Android packages
+        shell: bash
+        run: |
+          SDKMANAGER="${{ steps.sdkmanager.outputs.sdkmanager }}"
+
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+
+          "$SDKMANAGER" \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0" \
             "cmake;3.22.1" \
             "ndk;27.0.12077973"
 
-      - name: Configure Android SDK
+
+      # ============================================================
+      # 9. LOCAL.PROPERTIES
+      # ============================================================
+
+      - name: Configure local.properties
         shell: bash
         run: |
           PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$PROJECT_DIR/local.properties"
+          SDK_ROOT="${{ steps.android.outputs.sdk_root }}"
 
-          echo "SDK configurato:"
+          echo "sdk.dir=$SDK_ROOT" > \
+            "$PROJECT_DIR/local.properties"
+
+          echo "=== local.properties ==="
           cat "$PROJECT_DIR/local.properties"
+
+
+      # ============================================================
+      # 10. WHISPER.CPP
+      # ============================================================
 
       - name: Download whisper.cpp
         shell: bash
@@ -118,7 +236,9 @@ jobs:
           PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
 
           mkdir -p "$PROJECT_DIR/third_party"
-          rm -rf "$PROJECT_DIR/third_party/whisper.cpp"
+
+          rm -rf \
+            "$PROJECT_DIR/third_party/whisper.cpp"
 
           git clone \
             --depth 1 \
@@ -126,64 +246,144 @@ jobs:
             https://github.com/ggerganov/whisper.cpp.git \
             "$PROJECT_DIR/third_party/whisper.cpp"
 
-          echo "=== WHISPER.CPP INSTALLATO ==="
-          git -C "$PROJECT_DIR/third_party/whisper.cpp" \
+          echo "=== WHISPER VERSION ==="
+
+          git -C \
+            "$PROJECT_DIR/third_party/whisper.cpp" \
             rev-parse --short HEAD
+
+          test -f \
+            "$PROJECT_DIR/third_party/whisper.cpp/CMakeLists.txt"
+
+
+      # ============================================================
+      # 11. GRADLE
+      # ============================================================
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
-      - name: Verify project structure
+
+      # ============================================================
+      # 12. CONTROLLO PROGETTO
+      # ============================================================
+
+      - name: Verify Cronache project
         shell: bash
         run: |
           PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
 
-          echo "=== PROJECT ROOT ==="
+          echo "================================"
+          echo "CRONACHE PROJECT"
+          echo "================================"
+
           echo "$PROJECT_DIR"
 
-          echo "=== FILE ROOT ==="
+          echo ""
+          echo "=== ROOT ==="
           ls -la "$PROJECT_DIR"
 
+          echo ""
           echo "=== APP ==="
           ls -la "$PROJECT_DIR/app"
 
-          echo "=== FILE NATIVI ==="
+          echo ""
+          echo "=== GRADLE ==="
+
+          find "$PROJECT_DIR" \
+            -maxdepth 2 \
+            \( \
+              -name "*.gradle" \
+              -o -name "*.gradle.kts" \
+              -o -name "gradle.properties" \
+            \) \
+            -print
+
+          echo ""
+          echo "=== CMAKE / JNI ==="
+
           find "$PROJECT_DIR/app/src/main" \
-            \( -name "*.cpp" \
-            -o -name "*.c" \
-            -o -name "*.h" \
-            -o -name "CMakeLists.txt" \) \
+            \( \
+              -name "CMakeLists.txt" \
+              -o -name "*.cpp" \
+              -o -name "*.c" \
+              -o -name "*.h" \
+              -o -name "*.hpp" \
+            \) \
             -print || true
 
-      - name: Build Cronache Debug APK
+          echo ""
+          echo "=== WHISPER ==="
+
+          ls -la \
+            "$PROJECT_DIR/third_party/whisper.cpp" \
+            | head -30
+
+
+      # ============================================================
+      # 13. BUILD APK
+      # ============================================================
+
+      - name: Build Cronache APK
         shell: bash
+        env:
+          ANDROID_HOME: ${{ steps.android.outputs.sdk_root }}
+          ANDROID_SDK_ROOT: ${{ steps.android.outputs.sdk_root }}
+
         run: |
           PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
+
           cd "$PROJECT_DIR"
 
+          echo "================================"
+          echo "BUILD CRONACHE"
+          echo "================================"
+
           if [ -f "./gradlew" ]; then
+
+            echo "Uso Gradle Wrapper"
+
             chmod +x ./gradlew
 
             ./gradlew \
               :app:assembleDebug \
               --stacktrace \
               --no-daemon
+
           else
+
+            echo "Gradle Wrapper non presente."
+            echo "Uso Gradle 8.9 installato dal workflow."
+
             gradle \
               :app:assembleDebug \
               --stacktrace \
               --no-daemon
+
           fi
 
-      - name: Find generated APK
+
+      # ============================================================
+      # 14. TROVA APK
+      # ============================================================
+
+      - name: Collect APK
         if: success()
         shell: bash
         run: |
           PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
 
-          APK=$(find "$PROJECT_DIR/app/build/outputs/apk" \
+          echo "=== CERCO APK ==="
+
+          find "$PROJECT_DIR" \
+            -type f \
+            -name "*.apk" \
+            -print
+
+          APK=$(find \
+            "$PROJECT_DIR/app/build/outputs/apk" \
             -type f \
             -name "*.apk" \
             | head -n 1)
@@ -193,12 +393,20 @@ jobs:
             exit 1
           fi
 
-          echo "APK trovato: $APK"
+          echo "APK trovato:"
+          echo "$APK"
 
-          mkdir -p "$GITHUB_WORKSPACE/final_apk"
+          mkdir -p \
+            "$GITHUB_WORKSPACE/final_apk"
 
-          cp "$APK" \
+          cp \
+            "$APK" \
             "$GITHUB_WORKSPACE/final_apk/Cronache-Masterpiece-debug.apk"
+
+
+      # ============================================================
+      # 15. CARICA APK
+      # ============================================================
 
       - name: Upload Cronache APK
         if: success()
@@ -209,6 +417,34 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+
+      # ============================================================
+      # 16. LOG DI ERRORE
+      # ============================================================
+
+      - name: Collect failure information
+        if: failure()
+        shell: bash
+        run: |
+          echo "================================"
+          echo "BUILD FALLITA"
+          echo "================================"
+
+          echo ""
+          echo "=== REPORT ==="
+
+          find "$GITHUB_WORKSPACE/cronache_build" \
+            -type f \
+            \( \
+              -name "*.log" \
+              -o -name "*.txt" \
+              -o -name "*.html" \
+            \) \
+            -path "*/build/*" \
+            -print 2>/dev/null \
+            | head -200 || true
+
+
       - name: Upload failure reports
         if: failure()
         uses: actions/upload-artifact@v4
@@ -217,5 +453,6 @@ jobs:
           path: |
             cronache_build/**/app/build/reports/**
             cronache_build/**/app/build/outputs/logs/**
+            cronache_build/**/.cxx/**
           if-no-files-found: ignore
           retention-days: 7
