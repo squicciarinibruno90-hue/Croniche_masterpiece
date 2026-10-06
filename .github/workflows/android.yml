@@ -1,0 +1,221 @@
+name: Build Cronache Masterpiece APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show repository files
+        run: |
+          echo "=== FILE NEL REPOSITORY ==="
+          find . -maxdepth 3 -type f -print
+
+      - name: Find Cronache ZIP
+        id: find_zip
+        shell: bash
+        run: |
+          ZIP_FILE=$(find . -maxdepth 2 -type f \
+            \( -iname "Cronache_Masterpiece_Connected.zip" \
+            -o -iname "*Cronache*Masterpiece*.zip" \
+            -o -iname "*Cronache*.zip" \) \
+            | head -n 1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERRORE: ZIP di Cronache non trovato."
+            echo "ZIP presenti:"
+            find . -type f -iname "*.zip" -print || true
+            exit 1
+          fi
+
+          echo "ZIP trovato: $ZIP_FILE"
+          echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Extract Cronache project
+        shell: bash
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/cronache_build"
+          mkdir -p "$GITHUB_WORKSPACE/cronache_build"
+
+          unzip -o \
+            "${{ steps.find_zip.outputs.zip_file }}" \
+            -d "$GITHUB_WORKSPACE/cronache_build"
+
+          echo "=== CONTENUTO ESTRATTO ==="
+          find "$GITHUB_WORKSPACE/cronache_build" \
+            -maxdepth 3 \
+            -type f \
+            -print | head -200
+
+      - name: Find Android project root
+        id: project
+        shell: bash
+        run: |
+          SETTINGS=$(find "$GITHUB_WORKSPACE/cronache_build" \
+            -type f \
+            \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
+            | head -n 1)
+
+          if [ -z "$SETTINGS" ]; then
+            echo "ERRORE: settings.gradle.kts non trovato."
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$SETTINGS")
+
+          echo "Project root: $PROJECT_DIR"
+
+          if [ ! -d "$PROJECT_DIR/app" ]; then
+            echo "ERRORE: cartella app non trovata."
+            exit 1
+          fi
+
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK NDK and CMake
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "cmake;3.22.1" \
+            "ndk;27.0.12077973"
+
+      - name: Configure Android SDK
+        shell: bash
+        run: |
+          PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$PROJECT_DIR/local.properties"
+
+          echo "SDK configurato:"
+          cat "$PROJECT_DIR/local.properties"
+
+      - name: Download whisper.cpp
+        shell: bash
+        run: |
+          PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
+
+          mkdir -p "$PROJECT_DIR/third_party"
+          rm -rf "$PROJECT_DIR/third_party/whisper.cpp"
+
+          git clone \
+            --depth 1 \
+            --branch v1.7.6 \
+            https://github.com/ggerganov/whisper.cpp.git \
+            "$PROJECT_DIR/third_party/whisper.cpp"
+
+          echo "=== WHISPER.CPP INSTALLATO ==="
+          git -C "$PROJECT_DIR/third_party/whisper.cpp" \
+            rev-parse --short HEAD
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Verify project structure
+        shell: bash
+        run: |
+          PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
+
+          echo "=== PROJECT ROOT ==="
+          echo "$PROJECT_DIR"
+
+          echo "=== FILE ROOT ==="
+          ls -la "$PROJECT_DIR"
+
+          echo "=== APP ==="
+          ls -la "$PROJECT_DIR/app"
+
+          echo "=== FILE NATIVI ==="
+          find "$PROJECT_DIR/app/src/main" \
+            \( -name "*.cpp" \
+            -o -name "*.c" \
+            -o -name "*.h" \
+            -o -name "CMakeLists.txt" \) \
+            -print || true
+
+      - name: Build Cronache Debug APK
+        shell: bash
+        run: |
+          PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
+          cd "$PROJECT_DIR"
+
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+
+            ./gradlew \
+              :app:assembleDebug \
+              --stacktrace \
+              --no-daemon
+          else
+            gradle \
+              :app:assembleDebug \
+              --stacktrace \
+              --no-daemon
+          fi
+
+      - name: Find generated APK
+        if: success()
+        shell: bash
+        run: |
+          PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
+
+          APK=$(find "$PROJECT_DIR/app/build/outputs/apk" \
+            -type f \
+            -name "*.apk" \
+            | head -n 1)
+
+          if [ -z "$APK" ]; then
+            echo "ERRORE: APK non trovato."
+            exit 1
+          fi
+
+          echo "APK trovato: $APK"
+
+          mkdir -p "$GITHUB_WORKSPACE/final_apk"
+
+          cp "$APK" \
+            "$GITHUB_WORKSPACE/final_apk/Cronache-Masterpiece-debug.apk"
+
+      - name: Upload Cronache APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cronache-Masterpiece-APK
+          path: final_apk/Cronache-Masterpiece-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload failure reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cronache-Build-Failure-Reports
+          path: |
+            cronache_build/**/app/build/reports/**
+            cronache_build/**/app/build/outputs/logs/**
+          if-no-files-found: ignore
+          retention-days: 7
